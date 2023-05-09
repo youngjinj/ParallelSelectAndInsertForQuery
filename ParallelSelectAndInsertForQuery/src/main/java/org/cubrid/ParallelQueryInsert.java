@@ -18,6 +18,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 /*-
  * Settings to use the below in eclipse'
@@ -33,16 +35,55 @@ import java.util.concurrent.atomic.AtomicInteger;
  * (Preferences) -> Apply and Close
  */
 
+/*-
+	drop table if exists t1, t2, t3, t4, t4_1;
+	create table t1 (c1 varchar primary key, c2 varchar);
+	insert into t1 select 'A' || lpad (rownum, 7, '0'), 'B' || lpad (rownum, 7, '0') from db_class a, db_class b, db_class c, db_class d, db_class e limit 1000000;
+	create table t2 like t1;
+	create table t3 like t1;
+	create table t4 like t1;
+	alter table t4 add column thread_id varchar not null first;
+	create table t4_1 like t1;
+	
+	truncate table t2;
+	truncate table t3;
+	truncate table t4;
+	truncate table t4_1;
+	
+	...
+	
+	select count(*) from (select * from t1 intersect select * from t2); -- 100000
+	select count(*) from (select * from t1 intersect select * from t3); -- 100000
+	select count(*) from (select * from t1 intersect select * from t4_1); -- 100000
+ */
+
+/*-
+	echo "java_stored_procedure=y" >> $CUBRID/conf/cubrid.conf
+	
+	cubrid server restart demodb
+	
+	create or replace procedure parallel_batch(num_thread int) as language java
+	name 'ParallelQueryInsert.ParallelQueryInsertBatch(int)';
+	
+	call parallel_batch (12);
+	
+	tail -f ${HOME}/java0.log
+*/
+
 public class ParallelQueryInsert {
-	public static final String PREFIX_THREAD_ID = "__t_";
+	private static final Logger LOGGER = Logger.getLogger(ParallelQueryInsert.class.getName());
+	
+	private static final String DB_URL = "jdbc:cubrid:192.168.2.205:33000:demodb:::";
+	private static final String DB_USER = "dba";
+	private static final String DB_PASSWORD = "";
 
 	public static final int LABEL_COUNT = 2;
 	public static final String LABEL_BEGIN = "begin";
 	public static final String LABEL_END = "end";
 
-	private static final String DB_URL = "jdbc:cubrid:192.168.2.205:33000:demodb:::";
-	private static final String DB_USER = "dba";
-	private static final String DB_PASSWORD = "";
+	public static final String PREFIX_THREAD_ID = "__t_";
+	public static final int NOT_USED = 0;
+	public static final int USE_THREAD_ID = 1;
 
 	private static ConcurrentLinkedQueue<Map<String, String>> queue1;
 	private static ConcurrentLinkedQueue<Map<String, String>> queue2;
@@ -52,59 +93,9 @@ public class ParallelQueryInsert {
 	static AtomicInteger atomicThreadId;
 
 	public static void main(String[] args) {
-		String query = null;
-		int numRepeat = 1;
-		int numThreads = 1;
-
 		Instant start = Instant.now();
 
-		/*-
-		echo "java_stored_procedure=y" >> $CUBRID/conf/cubrid.conf
-		 
-		create or replace procedure parallel_insert([query] varchar, thread_num int) as language java
-		name 'ParallelQueryInsert.ParallelQueryInsertInternal(java.lang.String, int)';
-		
-		drop table if exists t1, t2, t3, t4, t4_1;
-		create table t1 (c1 varchar primary key, c2 varchar);
-		insert into t1 select 'A' || lpad (rownum, 7, '0'), 'B' || lpad (rownum, 7, '0') from db_class a, db_class b, db_class c, db_class d, db_class e limit 1000000;
-		create table t2 like t1;
-		create table t3 like t1;
-		create table t4 like t1;
-		alter table t4 add column thread_id varchar not null first;
-		create table t4_1 like t1;
-		
-		truncate table t2;
-		truncate table t3;
-		truncate table t4;
-		truncate table t4_1;
-		
-		call parallel_insert('insert into t2 select * from t1 where c1 between ? and ?', 10);
-		...
-		
-		select count(*) from (select * from t1 intersect select * from t2);
-		select count(*) from (select * from t1 intersect select * from t3);
-		select count(*) from (select * from t1 intersect select * from t4_1);
-		 */
-
-		numThreads = 100;
-
-		// @formatter:off
-		query = "insert into t2 select * from t1 where c1 between ? and ?";
-		numRepeat = 1;
-		// ParallelQueryInsertInternal(query, queue1, numRepeat, numThreads, false);
-
-		query = "insert into t3 select * from t1 where c1 between ? and ? and c1 between ? and ?";
-		numRepeat = 2;
-		// ParallelQueryInsertInternal(query, queue2, numRepeat, numThreads, false);
-
-		query = "insert into t4 select ?, t.* from t1 t where t.c1 between ? and ?";
-		numRepeat = 1;
-		ParallelQueryInsertInternal(query, queue3, numRepeat, numThreads, true);
-
-		query = "insert into t4_1 select t.c1, t.c2 from t4 t where t.thread_id between ? and ?";
-		numRepeat = 1;
-		ParallelQueryInsertInternal(query, queueWithThreadId, numRepeat, numThreads, false);
-		// @formatter:on
+		ParallelQueryInsertBatch(12);
 
 		Instant end = Instant.now();
 		Duration duration = Duration.between(start, end);
@@ -117,26 +108,51 @@ public class ParallelQueryInsert {
 		if (seconds < 0) {
 			formattedTime = "-" + formattedTime;
 		}
-		System.out.println("");
-		System.out.println("Elapsed time: " + formattedTime);
-		System.out.println("");
+
+		LOGGER.log(Level.INFO, "Elapsed time: " + formattedTime);
 	}
 
-	static {
-		queue1 = new ConcurrentLinkedQueue<Map<String, String>>();
-		queue2 = new ConcurrentLinkedQueue<Map<String, String>>();
-		queue3 = new ConcurrentLinkedQueue<Map<String, String>>();
-		queueWithThreadId = new ConcurrentLinkedQueue<Map<String, String>>();
+	public static void ParallelQueryInsertBatch(int numThreads) {
+		String query = null;
+		int numRepeat = 1;
+		
+		{
+			queue1 = makeQueue();
+			queue2 = makeQueue();
+			queue3 = makeQueue();
+			queueWithThreadId = makeQueueWithThreadId();
 
-		makeQueue1();
-		makeQueue2();
-		makeQueue3();
-		makeQueue4();
+			atomicThreadId = new AtomicInteger(1);
+		}
+		
+		LOGGER.log(Level.INFO, "BATCH Start.");
 
-		atomicThreadId = new AtomicInteger(1);
+		query = "insert into t2 select * from t1 where c1 between ? and ?";
+		numRepeat = 1;
+		ParallelQueryInsertInternal(query, queue1, numRepeat, numThreads, NOT_USED);
+		LOGGER.log(Level.INFO, "BATCH-1 Complete.");
+
+		query = "insert into t3 select * from t1 where c1 between ? and ? and c1 between ? and ?";
+		numRepeat = 2;
+		ParallelQueryInsertInternal(query, queue2, numRepeat, numThreads, NOT_USED);
+		LOGGER.log(Level.INFO, "BATCH-2 Complete.");
+
+		query = "insert into t4 select ?, t.* from t1 t where t.c1 between ? and ?";
+		numRepeat = 1;
+		ParallelQueryInsertInternal(query, queue3, numRepeat, numThreads, USE_THREAD_ID);
+		LOGGER.log(Level.INFO, "BATCH-3 Complete.");
+
+		query = "insert into t4_1 select t.c1, t.c2 from t4 t where t.thread_id between ? and ?";
+		numRepeat = 1;
+		ParallelQueryInsertInternal(query, queueWithThreadId, numRepeat, numThreads, NOT_USED);
+		LOGGER.log(Level.INFO, "BATCH-4 Complete.");
+		
+		LOGGER.log(Level.INFO, "BATCH-ALL Complete.");
 	}
 
-	private static void makeQueue1() {
+	private static ConcurrentLinkedQueue<Map<String, String>> makeQueue() {
+		ConcurrentLinkedQueue<Map<String, String>> queue = new ConcurrentLinkedQueue<Map<String, String>>();
+
 		// @formatter:off
 		String[][] valueList = {
 				{ "A0000001", "A0100000" },
@@ -156,62 +172,16 @@ public class ParallelQueryInsert {
 				Map<String, String> map = new HashMap<String, String>();
 				map.put(LABEL_BEGIN, valueList[i][0]);
 				map.put(LABEL_END, valueList[i][1]);
-				queue1.offer(map);
+				queue.offer(map);
 			}
 		}
+
+		return queue;
 	}
 
-	private static void makeQueue2() {
-		// @formatter:off
-		String[][] valueList = {
-				{ "A0000001", "A0100000" },
-				{ "A0100001", "A0200000" },
-				{ "A0200001", "A0300000" },
-				{ "A0300001", "A0400000" },
-				{ "A0400001", "A0500000" },
-				{ "A0500001", "A0600000" },
-				{ "A0600001", "A0700000" },
-				{ "A0700001", "A0800000" },
-				{ "A0800001", "A0900000" },
-				{ "A0900001", "A1000000" } };
-		// @formatter:on
+	private static ConcurrentLinkedQueue<Map<String, String>> makeQueueWithThreadId() {
+		ConcurrentLinkedQueue<Map<String, String>> queue = new ConcurrentLinkedQueue<Map<String, String>>();
 
-		for (int i = 0; i < valueList.length; i++) {
-			if (valueList[i].length == LABEL_COUNT) {
-				Map<String, String> map = new HashMap<String, String>();
-				map.put(LABEL_BEGIN, valueList[i][0]);
-				map.put(LABEL_END, valueList[i][1]);
-				queue2.offer(map);
-			}
-		}
-	}
-
-	private static void makeQueue3() {
-		// @formatter:off
-		String[][] valueList = {
-				{ "A0000001", "A0100000" },
-				{ "A0100001", "A0200000" },
-				{ "A0200001", "A0300000" },
-				{ "A0300001", "A0400000" },
-				{ "A0400001", "A0500000" },
-				{ "A0500001", "A0600000" },
-				{ "A0600001", "A0700000" },
-				{ "A0700001", "A0800000" },
-				{ "A0800001", "A0900000" },
-				{ "A0900001", "A1000000" } };
-		// @formatter:on
-
-		for (int i = 0; i < valueList.length; i++) {
-			if (valueList[i].length == LABEL_COUNT) {
-				Map<String, String> map = new HashMap<String, String>();
-				map.put(LABEL_BEGIN, valueList[i][0]);
-				map.put(LABEL_END, valueList[i][1]);
-				queue3.offer(map);
-			}
-		}
-	}
-
-	private static void makeQueue4() {
 		// @formatter:off
 		String[][] valueList = {
 				{ "1", "1" },
@@ -233,20 +203,22 @@ public class ParallelQueryInsert {
 				Map<String, String> map = new HashMap<String, String>();
 				map.put(LABEL_BEGIN, PREFIX_THREAD_ID + valueList[i][0]);
 				map.put(LABEL_END, PREFIX_THREAD_ID + valueList[i][1]);
-				queueWithThreadId.offer(map);
+				queue.offer(map);
 			}
 		}
+
+		return queue;
 	}
 
 	public static void ParallelQueryInsertInternal(String query, ConcurrentLinkedQueue<Map<String, String>> queue,
-			int paramNumRepeat, int paramNumThreads, boolean insertThreadId) {
-		int numRepeat = 1;
+			int paramNumRepeatBind, int paramNumThreads, int insertThreadId) {
+		int numRepeatBind = 1;
 		int numThreads = 1;
 
-		if (paramNumRepeat < 0) {
-			numRepeat = 1;
+		if (paramNumRepeatBind < 0) {
+			numRepeatBind = 1;
 		} else {
-			numRepeat = paramNumRepeat;
+			numRepeatBind = paramNumRepeatBind;
 		}
 
 		int availableProcessors = Runtime.getRuntime().availableProcessors();
@@ -261,7 +233,7 @@ public class ParallelQueryInsert {
 		try {
 			Class.forName("cubrid.jdbc.driver.CUBRIDDriver");
 		} catch (ClassNotFoundException e) {
-			e.printStackTrace();
+			LOGGER.log(Level.SEVERE, e.getMessage(), e);
 			return;
 		}
 
@@ -273,19 +245,20 @@ public class ParallelQueryInsert {
 				connectionList.add(connection);
 			}
 		} catch (SQLException e) {
-			e.printStackTrace();
+			LOGGER.log(Level.SEVERE, e.getMessage(), e);
 			return;
 		}
 
 		List<InsertCallable> insertCallableList = new ArrayList<>();
 
-		if (insertThreadId) {
+		if (insertThreadId == USE_THREAD_ID) {
 			for (int i = 0; i < numThreads; i++) {
-				insertCallableList.add(new InsertCallable(connectionList.get(i), query, queue, numRepeat, atomicThreadId.getAndIncrement()));
+				insertCallableList.add(new InsertCallable(connectionList.get(i), query, queue, numRepeatBind,
+						atomicThreadId.getAndIncrement()));
 			}
 		} else {
 			for (int i = 0; i < numThreads; i++) {
-				insertCallableList.add(new InsertCallable(connectionList.get(i), query, queue, numRepeat));
+				insertCallableList.add(new InsertCallable(connectionList.get(i), query, queue, numRepeatBind));
 			}
 		}
 
@@ -302,10 +275,10 @@ public class ParallelQueryInsert {
 			}
 		} catch (InterruptedException e) {
 			needRollback = true;
-			e.printStackTrace();
+			LOGGER.log(Level.SEVERE, e.getMessage(), e);
 		} catch (ExecutionException e) {
 			needRollback = true;
-			e.printStackTrace();
+			LOGGER.log(Level.SEVERE, e.getMessage(), e);
 		}
 
 		if (connectionList.size() > 0) {
@@ -324,20 +297,20 @@ public class ParallelQueryInsert {
 						future.get();
 					}
 
-					System.out.println("commit");
+					LOGGER.log(Level.INFO, "commit");
 				} catch (InterruptedException e) {
 					needRollback = true;
-					e.printStackTrace();
+					LOGGER.log(Level.SEVERE, e.getMessage(), e);
 				} catch (ExecutionException e) {
 					needRollback = true;
-					e.printStackTrace();
+					LOGGER.log(Level.SEVERE, e.getMessage(), e);
 				}
 
 				commitExecutorService.shutdown();
 				try {
 					commitExecutorService.awaitTermination(Long.MAX_VALUE, TimeUnit.NANOSECONDS);
 				} catch (InterruptedException e) {
-					e.printStackTrace();
+					LOGGER.log(Level.SEVERE, e.getMessage(), e);
 				}
 			}
 
@@ -356,20 +329,20 @@ public class ParallelQueryInsert {
 						future.get();
 					}
 
-					System.out.println("rollback");
+					LOGGER.log(Level.INFO, "rollback");
 				} catch (InterruptedException e) {
 					needRollback = true;
-					e.printStackTrace();
+					LOGGER.log(Level.SEVERE, e.getMessage(), e);
 				} catch (ExecutionException e) {
 					needRollback = true;
-					e.printStackTrace();
+					LOGGER.log(Level.SEVERE, e.getMessage(), e);
 				}
 
 				rollbackExecutorService.shutdown();
 				try {
 					rollbackExecutorService.awaitTermination(Long.MAX_VALUE, TimeUnit.NANOSECONDS);
 				} catch (InterruptedException e) {
-					e.printStackTrace();
+					LOGGER.log(Level.SEVERE, e.getMessage(), e);
 				}
 			}
 		}
@@ -378,7 +351,7 @@ public class ParallelQueryInsert {
 		try {
 			insertExecutorService.awaitTermination(Long.MAX_VALUE, TimeUnit.NANOSECONDS);
 		} catch (InterruptedException e) {
-			e.printStackTrace();
+			LOGGER.log(Level.SEVERE, e.getMessage(), e);
 		}
 
 		try {
@@ -388,33 +361,35 @@ public class ParallelQueryInsert {
 				}
 			}
 		} catch (SQLException e) {
-			e.printStackTrace();
+			LOGGER.log(Level.SEVERE, e.getMessage(), e);
 		}
 	}
 }
 
 class InsertCallable implements Callable<Void> {
+	private static final Logger LOGGER = Logger.getLogger(InsertCallable.class.getName());
+
 	private Connection connection;
 	private String query;
 	private ConcurrentLinkedQueue<Map<String, String>> queue;
-	private int numRepeat;
+	private int numRepeatBind;
 	private String threadIdWithPrefix;
 
 	public InsertCallable(Connection connection, String query, ConcurrentLinkedQueue<Map<String, String>> queue,
-			int numRepeat) {
+			int numRepeatBind) {
 		this.connection = connection;
 		this.query = query;
 		this.queue = queue;
-		this.numRepeat = numRepeat;
+		this.numRepeatBind = numRepeatBind;
 		this.threadIdWithPrefix = null;
 	}
 
 	public InsertCallable(Connection connection, String query, ConcurrentLinkedQueue<Map<String, String>> queue,
-			int numRepeat, long threadId) {
+			int numRepeatBind, long threadId) {
 		this.connection = connection;
 		this.query = query;
 		this.queue = queue;
-		this.numRepeat = numRepeat;
+		this.numRepeatBind = numRepeatBind;
 		this.threadIdWithPrefix = ParallelQueryInsert.PREFIX_THREAD_ID + threadId;
 	}
 
@@ -426,7 +401,7 @@ class InsertCallable implements Callable<Void> {
 
 				if (work != null) {
 					int i = 1;
-					int max = numRepeat * ParallelQueryInsert.LABEL_COUNT;
+					int max = numRepeatBind * ParallelQueryInsert.LABEL_COUNT;
 
 					if (threadIdWithPrefix != null) {
 						statement.setString(i, threadIdWithPrefix);
@@ -444,7 +419,7 @@ class InsertCallable implements Callable<Void> {
 
 				int count = 0;
 				count = statement.executeUpdate();
-				System.out.println("inserted " + count + " rows");
+				LOGGER.log(Level.INFO, "inserted " + count + " rows");
 			}
 		} catch (SQLException e) {
 			throw e;
