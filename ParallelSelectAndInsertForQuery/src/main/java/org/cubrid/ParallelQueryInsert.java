@@ -505,7 +505,8 @@ class InsertCallable implements Callable<Void> {
 	public Void call() throws SQLException {
 		try (PreparedStatement statement = connection.prepareStatement(query)) {
 			while (!Thread.interrupted()) {
-				Map<String, String> work = queue.poll();
+
+				Map<String, String> work = (queue != null) ? queue.poll() : null;
 
 				if (work != null) {
 					int i = 1;
