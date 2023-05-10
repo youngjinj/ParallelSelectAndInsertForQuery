@@ -7,6 +7,7 @@ import java.sql.SQLException;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -67,12 +68,12 @@ import java.util.logging.Logger;
 	
 	call parallel_batch (12);
 	
-	tail -f ${HOME}/java0.log
+	tail -f ${HOME}/java#.log
 */
 
 public class ParallelQueryInsert {
 	private static final Logger LOGGER = Logger.getLogger(ParallelQueryInsert.class.getName());
-	
+
 	private static final String DB_URL = "jdbc:cubrid:192.168.2.205:33000:demodb:::";
 	private static final String DB_USER = "dba";
 	private static final String DB_PASSWORD = "";
@@ -84,11 +85,6 @@ public class ParallelQueryInsert {
 	public static final String PREFIX_THREAD_ID = "__t_";
 	public static final int NOT_USED = 0;
 	public static final int USE_THREAD_ID = 1;
-
-	private static ConcurrentLinkedQueue<Map<String, String>> queue1;
-	private static ConcurrentLinkedQueue<Map<String, String>> queue2;
-	private static ConcurrentLinkedQueue<Map<String, String>> queue3;
-	private static ConcurrentLinkedQueue<Map<String, String>> queueWithThreadId;
 
 	static AtomicInteger atomicThreadId;
 
@@ -110,51 +106,43 @@ public class ParallelQueryInsert {
 		}
 
 		LOGGER.log(Level.INFO, "Elapsed time: " + formattedTime);
+
 	}
 
 	public static void ParallelQueryInsertBatch(int numThreads) {
-		String query = null;
-		int numRepeat = 1;
-		
 		{
-			queue1 = makeQueue();
-			queue2 = makeQueue();
-			queue3 = makeQueue();
-			queueWithThreadId = makeQueueWithThreadId();
-
 			atomicThreadId = new AtomicInteger(1);
 		}
-		
+
+		/*-
+		 * BATCH-BEGIN
+		 */
+
 		LOGGER.log(Level.INFO, "BATCH Start.");
 
-		query = "insert into t2 select * from t1 where c1 between ? and ?";
-		numRepeat = 1;
-		ParallelQueryInsertInternal(query, queue1, numRepeat, numThreads, NOT_USED);
-		LOGGER.log(Level.INFO, "BATCH-1 Complete.");
+		/*-
+		 * numRepeat1~4는 Thread에서 바인드 값의 한 쌍을 가져와서 바인드를 하는 횟수를 의미합니다.
+		 * 
+		 * 예를 들어,
+		 * 쿼리에서 바인드가 필요한 'BETWEEN... AND...' 조건이 1개만 있다면 numRepeat는 1이 될 것입니다.
+		 * 쿼리에서 바인드가 필요한 'BETWEEN... AND...' 조건이 2개가 있다면 numRepeat는 2가 될 것입니다.
+		 * ...
+		 * 쿼리에서 바인드가 필요한 'BETWEEN... AND...' 조건이 N개가 있다면 numRepeat는 N이 되어야 합니다.
+		 * 
+		 * 바인드 값의 리스트를 만들 때는
+		 * 쿼리에서 바인드가 필요한 'BETWEEN... AND...' 조건의 개수에 관계 없이 한 쌍(2개)의 배열로 만들어야 합니다.
+		 */
 
-		query = "insert into t3 select * from t1 where c1 between ? and ? and c1 between ? and ?";
-		numRepeat = 2;
-		ParallelQueryInsertInternal(query, queue2, numRepeat, numThreads, NOT_USED);
-		LOGGER.log(Level.INFO, "BATCH-2 Complete.");
+		/*-
+		 * BATCH-1
+		 */
 
-		query = "insert into t4 select ?, t.* from t1 t where t.c1 between ? and ?";
-		numRepeat = 1;
-		ParallelQueryInsertInternal(query, queue3, numRepeat, numThreads, USE_THREAD_ID);
-		LOGGER.log(Level.INFO, "BATCH-3 Complete.");
-
-		query = "insert into t4_1 select t.c1, t.c2 from t4 t where t.thread_id between ? and ?";
-		numRepeat = 1;
-		ParallelQueryInsertInternal(query, queueWithThreadId, numRepeat, numThreads, NOT_USED);
-		LOGGER.log(Level.INFO, "BATCH-4 Complete.");
-		
-		LOGGER.log(Level.INFO, "BATCH-ALL Complete.");
-	}
-
-	private static ConcurrentLinkedQueue<Map<String, String>> makeQueue() {
-		ConcurrentLinkedQueue<Map<String, String>> queue = new ConcurrentLinkedQueue<Map<String, String>>();
-
+		String query1 = "insert into t2 select * from t1 where c1 between ? and ?";
 		// @formatter:off
-		String[][] valueList = {
+		/*-
+		 * 모든 바인드 값의 리스트는 'BETWEEN... AND...' 조건에 바인드 되는 한 쌍(2개)의 배열로 만들어야 합니다.
+		 */
+		String[][] valueList1 = {
 				{ "A0000001", "A0100000" },
 				{ "A0100001", "A0200000" },
 				{ "A0200001", "A0300000" },
@@ -164,8 +152,142 @@ public class ParallelQueryInsert {
 				{ "A0600001", "A0700000" },
 				{ "A0700001", "A0800000" },
 				{ "A0800001", "A0900000" },
-				{ "A0900001", "A1000000" } };
+				{ "A0900001", "A1000000" }
+			};
 		// @formatter:on
+		int numRepeat1 = 1;
+		LOGGER.log(Level.INFO, "BATCH-1 Start.");
+		ParallelQueryInsertInternal(query1, makeQueue(valueList1), numRepeat1, numThreads, NOT_USED);
+		LOGGER.log(Level.INFO, "BATCH-1 Complete.");
+
+		/*-
+		 * BATCH-2
+		 */
+
+		String query2 = "insert into t3 select * from t1 where c1 between ? and ? and c1 between ? and ?";
+		// @formatter:off
+		/*-
+		 * 모든 바인드 값의 리스트는 'BETWEEN... AND...' 조건에 바인드 되는 한 쌍(2개)의 배열로 만들어야 합니다.
+		 */
+		String[][] valueList2 = {
+				{ "A0000001", "A0100000" },
+				{ "A0100001", "A0200000" },
+				{ "A0200001", "A0300000" },
+				{ "A0300001", "A0400000" },
+				{ "A0400001", "A0500000" },
+				{ "A0500001", "A0600000" },
+				{ "A0600001", "A0700000" },
+				{ "A0700001", "A0800000" },
+				{ "A0800001", "A0900000" },
+				{ "A0900001", "A1000000" }
+			};
+		// @formatter:on
+		int numRepeat2 = 2;
+		LOGGER.log(Level.INFO, "BATCH-2 Start.");
+		ParallelQueryInsertInternal(query2, makeQueue(valueList2), numRepeat2, numThreads, NOT_USED);
+		LOGGER.log(Level.INFO, "BATCH-2 Complete.");
+
+		/*-
+		 * BATCH-3
+		 */
+
+		String query3 = "insert into t4 select ?, t.* from t1 t where t.c1 between ? and ?";
+		// @formatter:off
+		/*-
+		 * 모든 바인드 값의 리스트는 'BETWEEN... AND...' 조건에 바인드 되는 한 쌍(2개)의 배열로 만들어야 합니다.
+		 */
+		String[][] valueList3 = {
+				{ "A0000001", "A0100000" },
+				{ "A0100001", "A0200000" },
+				{ "A0200001", "A0300000" },
+				{ "A0300001", "A0400000" },
+				{ "A0400001", "A0500000" },
+				{ "A0500001", "A0600000" },
+				{ "A0600001", "A0700000" },
+				{ "A0700001", "A0800000" },
+				{ "A0800001", "A0900000" },
+				{ "A0900001", "A1000000" }
+			};
+		// @formatter:on
+		int numRepeat3 = 1;
+		LOGGER.log(Level.INFO, "BATCH-3 Start.");
+		ParallelQueryInsertInternal(query3, makeQueue(valueList3), numRepeat3, numThreads, USE_THREAD_ID);
+		LOGGER.log(Level.INFO, "BATCH-3 Complete.");
+
+		/*-
+		 * BATCH-4
+		 */
+
+		String query4 = "insert into t4_1 select t.c1, t.c2 from t4 t where t.thread_id between ? and ?";
+		// @formatter:off
+		/*-
+		 * Thread Id를 'BETWEEN... AND...' 조건으로 사용하시려면,
+		 * 바인드 값의 리스트를 만들 때 INSERT 했던 Thread Id의 범위와 동일해야 합니다.
+		 * 
+		 * 예를 들어,
+		 * BATCH-3에서 numThreads를 12로 해서 INSERT 했다면, Thread Id는 1부터 12까지 INSERT 됩니다.
+		 * BATCH-4에서 사용할 바인드 값의 리스트도 1부터 12까지 만들어야 합니다.
+		 *         
+		 * BATCH-4를 수행할 때 numThreads는 BATCH-3의 numThreads와 같지 않아도 됩니다.
+		 * BATCH-3을 수행할 때는 numThreads를 12로 설정했지만,
+		 * BATCH-4를 수행할 때는 numThreads를 11이나 13으로 해도 문제가 없습니다.
+		 * 
+		 * 단, 모든 바인드 값의 리스트는 'BETWEEN... AND...' 조건에 바인드 되는 한 쌍(2개)의 배열로 만들어야 합니다.
+		 */
+		String[][] valueList4 = {
+				{ "1", "1" },
+				{ "2", "2" },
+				{ "3", "3" },
+				{ "4", "4" },
+				{ "5", "5" },
+				{ "6", "6" },
+				{ "7", "7" },
+				{ "8", "8" },
+				{ "9", "9" },
+				{ "10", "10" },
+				{ "11", "11" },
+				{ "12", "12" } };
+		
+		/*-
+		 * 편의성을 위해서 makeThreadIdArray 함수를 제공합니다.
+		 * makeThreadIdArray 함수를 사용하면, valueList4처럼 모든 값을 작성하지 않고, numThreads를 전달해서 자동으로 만들 수 있습니다.
+		 * 
+		 * Thread Id를 바인드 값의 리스트로 만드는 경우에는 makeQueue 함수를 사용하면 안 됩니다.
+		 * PREFIX_THREAD_ID를 붙여주기 위해서 makeQueueWithThreadId 함수를 사용해야 합니다.
+		 * 
+		 */
+		String[][] valueList5 = makeThreadIdArray(numThreads);
+		// @formatter:on
+		int numRepeat4 = 1;
+		LOGGER.log(Level.INFO, "BATCH-4 Start.");
+		ParallelQueryInsertInternal(query4, makeQueueWithThreadId(valueList5), numRepeat4, numThreads, NOT_USED);
+		LOGGER.log(Level.INFO, "BATCH-4 Complete.");
+
+		/*-
+		 * BATCH-END
+		 */
+
+		LOGGER.log(Level.INFO, "BATCH-ALL Complete.");
+	}
+
+	private static String[][] makeThreadIdArray(int paramNumThreads) {
+		int numThreads = checkNumThreads(paramNumThreads);
+
+		List<List<String>> threadIdList = new ArrayList<>();
+		for (int i = 0; i < numThreads; i++) {
+			threadIdList.add(new ArrayList<>(Arrays.asList(String.valueOf(i + 1), String.valueOf(i + 1))));
+		}
+
+		String[][] threadIdArray = threadIdList.stream().map(list -> list.toArray(new String[list.size()]))
+				.toArray(String[][]::new);
+
+		LOGGER.log(Level.INFO, Arrays.deepToString(threadIdArray));
+
+		return threadIdArray;
+	}
+
+	private static ConcurrentLinkedQueue<Map<String, String>> makeQueue(String[][] valueList) {
+		ConcurrentLinkedQueue<Map<String, String>> queue = new ConcurrentLinkedQueue<Map<String, String>>();
 
 		for (int i = 0; i < valueList.length; i++) {
 			if (valueList[i].length == LABEL_COUNT) {
@@ -179,24 +301,8 @@ public class ParallelQueryInsert {
 		return queue;
 	}
 
-	private static ConcurrentLinkedQueue<Map<String, String>> makeQueueWithThreadId() {
+	private static ConcurrentLinkedQueue<Map<String, String>> makeQueueWithThreadId(String[][] valueList) {
 		ConcurrentLinkedQueue<Map<String, String>> queue = new ConcurrentLinkedQueue<Map<String, String>>();
-
-		// @formatter:off
-		String[][] valueList = {
-				{ "1", "1" },
-				{ "2", "2" },
-				{ "3", "3" },
-				{ "4", "4" },
-				{ "5", "5" },
-				{ "6", "6" },
-				{ "7", "7" },
-				{ "8", "8" },
-				{ "9", "9" },
-				{ "10", "10" },
-				{ "11", "11" },
-				{ "12", "12" } };
-		// @formatter:on
 
 		for (int i = 0; i < valueList.length; i++) {
 			if (valueList[i].length == LABEL_COUNT) {
@@ -210,24 +316,26 @@ public class ParallelQueryInsert {
 		return queue;
 	}
 
+	private static int checkNumThreads(int numThreads) {
+		int availableProcessors = Runtime.getRuntime().availableProcessors();
+		if (numThreads > availableProcessors) {
+			return availableProcessors;
+		} else if (numThreads < 0) {
+			return 1;
+		} else {
+			return numThreads;
+		}
+	}
+
 	public static void ParallelQueryInsertInternal(String query, ConcurrentLinkedQueue<Map<String, String>> queue,
 			int paramNumRepeatBind, int paramNumThreads, int insertThreadId) {
 		int numRepeatBind = 1;
-		int numThreads = 1;
+		int numThreads = checkNumThreads(paramNumThreads);
 
 		if (paramNumRepeatBind < 0) {
 			numRepeatBind = 1;
 		} else {
 			numRepeatBind = paramNumRepeatBind;
-		}
-
-		int availableProcessors = Runtime.getRuntime().availableProcessors();
-		if (paramNumThreads > availableProcessors) {
-			numThreads = availableProcessors;
-		} else if (paramNumThreads < 0) {
-			numThreads = 1;
-		} else {
-			numThreads = paramNumThreads;
 		}
 
 		try {
